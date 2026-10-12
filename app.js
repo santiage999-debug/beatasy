@@ -1,9 +1,10 @@
 'use strict';
+if (window.CanvasRenderingContext2D && !CanvasRenderingContext2D.prototype.roundRect) CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h) { this.rect(x, y, w, h); };
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const h = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
 const icon = id => `<svg><use href="#i-${id}"/></svg>`;
 const AC = window.AudioContext || window.webkitAudioContext;
-const ctx = new AC({ latencyHint: 'interactive' });
+let ctx; try { ctx = new AC({ latencyHint: 'interactive' }); } catch (e) { ctx = new AC(); }
 let sf = null, synth = null;
 function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('show'); clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove('show'), 1900); }
 
@@ -95,7 +96,7 @@ const FAMCOL = ['#ff3d71', '#ff7a3d', '#ffb020', '#e8a33d', '#7b5cff', '#c45cff'
 let proj = JSON.parse(localStorage.getItem('proj') || 'null');
 let selId = null;
 const save = () => localStorage.setItem('proj', JSON.stringify(proj));
-const presetName = (bank, prog) => { const p = sf.presets.find(p => p.bank === bank && p.program === prog); return p ? p.name : '—'; };
+const presetName = (bank, prog) => { const p = sf && sf.index.find(p => p.bank === bank && p.program === prog); return p ? p.name : '—'; };
 const trackIcon = t => t.type === 'drums' ? 'drum' : t.voice ? 'mic' : FAM[t.prog >> 3][1];
 const sel = () => proj.tracks.find(t => t.id === selId) || proj.tracks[0];
 function newTrack(type, prog, voice) {
@@ -137,8 +138,15 @@ function tick() {
   T.voices = T.voices.filter(x => x.end > ctx.currentTime);
   if (!proj.loop && !T.rec && curPos() > songLen() + .6) stop();
 }
+function ensureSounds() {
+  const need = proj.tracks.filter(t => !sf.isLoaded(t.bank, t.prog));
+  if (!need.length) return Promise.resolve();
+  status('Cargando sonidos…');
+  return Promise.all(need.map(t => sf.load(t.bank, t.prog))).then(() => status(''));
+}
 function play() {
-  if (T.playing) return; unlock();
+  if (T.playing || T.waiting) return; unlock();
+  if (proj.tracks.some(t => !sf.isLoaded(t.bank, t.prog))) { T.waiting = true; ensureSounds().then(() => { T.waiting = false; play(); }, e => { T.waiting = false; showErr(e); }); return; }
   T.loopLen = loopLen(); if (proj.loop && !T.rec && T.pos >= T.loopLen) T.pos = 0;
   T.startPos = T.pos; T.startCtx = ctx.currentTime + .06; T.sched = 0; T.playing = true;
   T.timer = setInterval(tick, 25); tick(); $('#tPlay').classList.add('on'); $('#tPlay').innerHTML = icon('stop'); raf();
@@ -209,23 +217,26 @@ function renderTracks() {
   }
   drawAll(); syncPlayView();
 }
+const DPR = () => Math.min(2, devicePixelRatio || 1);
+// Lienzos del tamaño de la ventana visible (no gigantes): se redibujan al desplazar. Evita fallos de WebKit/iOS con lienzos muy anchos.
 function drawAll() {
-  const bars = Math.max(16, Math.ceil(songLen() / barSec()) + 4), W = Math.ceil(bars * barSec() * pps()), dpr = devicePixelRatio || 1;
+  const bars = Math.max(16, Math.ceil(songLen() / barSec()) + 4), W = Math.ceil(bars * barSec() * pps()), dpr = DPR();
+  const sc = $('#lanesScroll'), vw = Math.max(1, sc.clientWidth), ox = sc.scrollLeft;
   $('#lanes').style.width = W + 'px';
-  const rc = $('#ruler'); rc.width = W * dpr; rc.height = 28 * dpr; rc.style.width = W + 'px';
-  const g = rc.getContext('2d'); g.scale(dpr, dpr); g.font = '600 10px -apple-system,sans-serif';
-  for (let b = 0; b < bars * 4; b++) { const x = b * beatSec() * pps(); g.fillStyle = b % 4 ? '#3a3d48' : '#8a8fa0'; g.fillRect(x, b % 4 ? 20 : 12, 1, 28); if (b % 4 === 0) { g.fillStyle = '#9aa0ae'; g.fillText(b / 4 + 1, x + 4, 12); } }
+  const prep = (c, hgt) => { c.width = vw * dpr; c.height = hgt * dpr; c.style.width = vw + 'px'; c.style.height = hgt + 'px'; const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, -ox * dpr, 0); return g; };
+  const b0 = Math.max(0, Math.floor(ox / (beatSec() * pps())) - 1), b1 = Math.ceil((ox + vw) / (beatSec() * pps())) + 1;
+  const g = prep($('#ruler'), 28); g.font = '600 10px -apple-system,sans-serif';
+  for (let b = b0; b < b1; b++) { const x = b * beatSec() * pps(); g.fillStyle = b % 4 ? '#3a3d48' : '#8a8fa0'; g.fillRect(x, b % 4 ? 20 : 12, 1, 28); if (b % 4 === 0) { g.fillStyle = '#9aa0ae'; g.fillText(String(b / 4 + 1), x + 4, 12); } }
   if (proj.loop) { g.fillStyle = 'rgba(255,61,113,.35)'; g.fillRect(0, 24, loopLen() * pps(), 4); }
   for (const c of $$('#lanes .lane')) {
     const t = proj.tracks.find(x => x.id == c.dataset.id); if (!t) continue;
-    c.width = W * dpr; c.height = 76 * dpr; c.style.width = W + 'px';
-    const q = c.getContext('2d'); q.scale(dpr, dpr);
-    for (let b = 0; b < bars * 4; b++) { q.fillStyle = b % 4 ? 'rgba(255,255,255,.025)' : 'rgba(255,255,255,.07)'; q.fillRect(b * beatSec() * pps(), 0, 1, 76); }
+    const q = prep(c, 76);
+    for (let b = b0; b < b1; b++) { q.fillStyle = b % 4 ? 'rgba(255,255,255,.025)' : 'rgba(255,255,255,.07)'; q.fillRect(b * beatSec() * pps(), 0, 1, 76); }
     if (!t.notes.length) continue;
     const s = t.notes[0].start, e = Math.max(...t.notes.map(n => n.start + n.dur));
     const x0 = Math.floor(s / barSec()) * barSec() * pps(), x1 = Math.ceil(e / barSec()) * barSec() * pps();
     q.fillStyle = t.color + '33'; q.strokeStyle = t.color; q.lineWidth = 1.5;
-    q.beginPath(); q.roundRect ? q.roundRect(x0 + 1, 5, x1 - x0 - 2, 66, 8) : q.rect(x0 + 1, 5, x1 - x0 - 2, 66); q.fill(); q.stroke();
+    q.beginPath(); q.rect(x0 + 1, 5, x1 - x0 - 2, 66); q.fill(); q.stroke();
     q.fillStyle = t.color; q.fillRect(x0 + 1, 5, x1 - x0 - 2, 14);
     q.fillStyle = '#000'; q.font = '700 10px -apple-system,sans-serif'; q.fillText(t.name, x0 + 6, 15);
     const lo = Math.min(...t.notes.map(n => n.midi)), hi = Math.max(...t.notes.map(n => n.midi)), rows = Math.max(12, hi - lo + 1), nh = 48 / rows;
@@ -234,6 +245,8 @@ function drawAll() {
   }
   $('#playhead').style.transform = `translateX(${curPos() * pps()}px)`;
 }
+let scrollRaf = 0; $('#lanesScroll').addEventListener('scroll', () => { if (!scrollRaf) scrollRaf = requestAnimationFrame(() => { scrollRaf = 0; drawAll(); }); }, { passive: true });
+addEventListener('resize', () => { if (proj) drawAll(); });
 $('#ruler').addEventListener('click', e => { const r = e.target.getBoundingClientRect(); const p = Math.max(0, (e.clientX - r.left) / pps()); const was = T.playing; stop(); T.pos = Math.round(p / beatSec()) * beatSec(); if (was) play(); raf(); drawAll(); });
 function trackMenu(t) {
   openSheet(`<div class="sh-h"><h3>${t.name}</h3></div>
@@ -277,7 +290,7 @@ function openBrowser(target) {
     const cats = b.querySelector('#shCats'), cards = b.querySelector('#shCards');
     const drawCards = () => {
       cards.innerHTML = '';
-      const list = sf.presets.filter(p => p.bank === (drums ? 128 : 0) && (drums || q ? true : (p.program >> 3) === cat) && (!q || p.name.toLowerCase().includes(q) || FAM[p.program >> 3][0].toLowerCase().includes(q))).sort((a, b) => a.program - b.program);
+      const list = sf.index.filter(p => p.bank === (drums ? 128 : 0) && (drums || q ? true : (p.program >> 3) === cat) && (!q || p.name.toLowerCase().includes(q) || FAM[p.program >> 3][0].toLowerCase().includes(q))).sort((a, b) => a.program - b.program);
       for (const p of list) {
         const f = drums ? 14 : p.program >> 3, on = p.program === target.prog;
         const c = h('button', 'card' + (on ? ' on' : ''), `<span class="ci" style="background:linear-gradient(135deg,${FAMCOL[f]},${FAMCOL[(f + 3) % 16]})">${icon(drums ? 'drum' : FAM[f][1])}</span><span class="ct"><b>${p.name}</b><small>${drums ? 'Kit' : FAM[f][0]} · ${p.program + 1}</small></span>`);
@@ -286,7 +299,7 @@ function openBrowser(target) {
           if (target.id) { target.name = drums ? 'Batería · ' + p.name : (target.voice ? 'Voz → ' : '') + p.name; save(); renderTracks(); }
           else { localStorage.setItem('vozProg', p.program); syncVoz(); }
           cards.querySelectorAll('.card').forEach(x => x.classList.toggle('on', x === c));
-          const v = synth.noteOn(drums ? 128 : 0, p.program, drums ? 38 : 60, 100); setTimeout(() => synth.noteOff(v), 450);
+          const bk = drums ? 128 : 0; c.classList.add('ld'); sf.load(bk, p.program).then(() => { c.classList.remove('ld'); const v = synth.noteOn(bk, p.program, drums ? 38 : 60, 100); setTimeout(() => synth.noteOff(v), 450); }, err => { c.classList.remove('ld'); showErr(err); });
         };
         cards.append(c);
       }
@@ -350,7 +363,7 @@ $('#curTrackBtn').onclick = () => {
 $('#instBtn').onclick = () => sel() ? openBrowser(sel()) : $('#addTrackBtn').click();
 function drawProll() {
   const c = $('#proll'), t = sel(); if (!c.clientWidth) return;
-  const dpr = devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight; c.width = W * dpr; c.height = H * dpr;
+  const dpr = DPR(), W = c.clientWidth, H = c.clientHeight; c.width = W * dpr; c.height = H * dpr;
   const g = c.getContext('2d'); g.scale(dpr, dpr);
   const drums = t && t.type === 'drums';
   const lo = drums ? 35 : oct * 12 + 12, hi = drums ? 59 : lo + 24, rows = hi - lo + 1, rh = H / rows;
@@ -372,7 +385,7 @@ function drawProll() {
 /* ================= Voz a instrumento ================= */
 let mic = null, vozBuf = [], vozNotes = [], analyser = null, vozT0 = 0;
 const vozProg = () => +(localStorage.getItem('vozProg') || 0);
-function syncVoz() { const p = vozProg(); $('#vozInst .nm').textContent = presetName(0, p); $('#vozInst .ico').innerHTML = icon(FAM[p >> 3][1]); }
+function syncVoz() { const p = vozProg(); sf.load(0, p).catch(() => {}); $('#vozInst .nm').textContent = presetName(0, p); $('#vozInst .ico').innerHTML = icon(FAM[p >> 3][1]); }
 $('#vozInst').onclick = () => openBrowser({ type: 'inst', prog: vozProg() });
 async function startVoz() {
   if (!navigator.mediaDevices?.getUserMedia) return toast('Este navegador no permite usar el micrófono (requiere https)');
@@ -406,7 +419,7 @@ function stopVoz() {
   }, 40);
 }
 function drawWave() {
-  const c = $('#wave'), dpr = devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight; c.width = W * dpr; c.height = H * dpr;
+  const c = $('#wave'), dpr = DPR(), W = c.clientWidth, H = c.clientHeight; c.width = W * dpr; c.height = H * dpr;
   const g = c.getContext('2d'); g.scale(dpr, dpr);
   const grd = g.createLinearGradient(0, 0, W, 0); grd.addColorStop(0, '#ff3d71'); grd.addColorStop(1, '#7b5cff');
   if (mic && analyser) {
@@ -420,7 +433,7 @@ function drawWave() {
   if (mic) requestAnimationFrame(drawWave); else drawWave.hist = hs;
 }
 function drawVozRoll() {
-  const c = $('#vozRoll'), dpr = devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight; c.width = W * dpr; c.height = H * dpr;
+  const c = $('#vozRoll'), dpr = DPR(), W = c.clientWidth, H = c.clientHeight; c.width = W * dpr; c.height = H * dpr;
   const g = c.getContext('2d'); g.scale(dpr, dpr); if (!vozNotes.length) return;
   const end = Math.max(...vozNotes.map(n => n.start + n.dur)), lo = Math.min(...vozNotes.map(n => n.midi)) - 2, hi = Math.max(...vozNotes.map(n => n.midi)) + 2, rh = H / (hi - lo + 1);
   const grd = g.createLinearGradient(0, 0, W, 0); grd.addColorStop(0, '#ff3d71'); grd.addColorStop(1, '#7b5cff'); g.fillStyle = grd;
@@ -477,19 +490,42 @@ $('#coach').addEventListener('touchend', e => { if (cx0 == null) return; const d
 addEventListener('resize', () => { if (!$('#coach').hidden) goStep(step); });
 
 /* ================= Arranque ================= */
-if ('serviceWorker' in navigator && location.protocol === 'https:' && !location.hostname.endsWith('.local')) navigator.serviceWorker.register('sw.js').catch(() => {});
-fetch('TimGM6mb.sf2').then(r => r.arrayBuffer()).then(ab => {
-  sf = new SF2(ab); synth = new Synth(ctx, sf, input);
-  if (!proj) {
-    proj = { bpm: 100, metro: false, loop: false, tracks: [] };
-    // migrar pista de la versión anterior
-    const old = JSON.parse(localStorage.getItem('track') || '[]');
-    newTrack('inst', +(localStorage.getItem('prog') || 0));
-    if (old.length) proj.tracks[0].notes = old.filter(n => n.bank !== 128).map(({ midi, start, dur, vel }) => ({ midi, start, dur, vel }));
-    newTrack('drums', 0); selId = proj.tracks[0].id; save();
-  }
-  selId = proj.tracks[0]?.id;
-  buildRack(); buildPads(); syncTransport(); syncVoz(); renderTracks(); raf();
-  $('#loading').style.opacity = 0; setTimeout(() => $('#loading').remove(), 400);
-  if (!localStorage.getItem('tour2')) setTimeout(openCoach, 300);
-}).catch(e => { $('#loading span').textContent = 'Error al cargar sonidos: ' + e; });
+function status(msg) { const el = $('#netStatus'); el.textContent = msg; el.hidden = !msg; }
+function showErr(e) { const m = (e && e.message) || String(e); status(''); toast('Error: ' + m); console.error(e); }
+window.addEventListener('unhandledrejection', ev => showErr(ev.reason));
+// actualizar service worker sin quedarse con versiones viejas
+if ('serviceWorker' in navigator && location.protocol === 'https:' && !location.hostname.endsWith('.local')) {
+  navigator.serviceWorker.register('sw.js').then(reg => reg.update && reg.update()).catch(() => {});
+  let reloaded = false; navigator.serviceWorker.addEventListener('controllerchange', () => { if (!reloaded && !T.playing && !mic) { reloaded = true; } });
+}
+function boot() {
+  const L = $('#loading'), msg = $('#ldMsg'), pctEl = $('#ldPct'), bar = $('#loading .bar i');
+  $('#ldRetry').hidden = true; msg.textContent = 'Cargando instrumentos…'; pctEl.textContent = '0%'; bar.style.width = '0%'; bar.classList.remove('err');
+  sf = new ChunkBank('sf/');
+  fetchBin('sf/index.json', null, 20000).then(ab => {
+    sf.index = JSON.parse(new TextDecoder().decode(new Uint8Array(ab)));
+    synth = new Synth(ctx, sf, input);
+    if (!proj) {
+      proj = { bpm: 100, metro: false, loop: false, tracks: [] };
+      const old = JSON.parse(localStorage.getItem('track') || '[]');
+      newTrack('inst', +(localStorage.getItem('prog') || 0));
+      if (old.length) proj.tracks[0].notes = old.filter(n => n.bank !== 128).map(({ midi, start, dur, vel }) => ({ midi, start, dur, vel }));
+      newTrack('drums', 0);
+    }
+    selId = proj.tracks[0] && proj.tracks[0].id;
+    // sonidos iniciales: los de las pistas (piano + batería por defecto)
+    const first = [...new Set(proj.tracks.map(t => sf.entry(t.bank, t.prog).file))].map(f => sf.index.find(e => e.file === f));
+    const total = first.reduce((a, e) => a + e.size, 0) || 1, got = {};
+    sf.onprogress = (e, g) => { got[e.file] = g; const p = Math.min(100, Math.round(Object.values(got).reduce((a, b) => a + b, 0) / total * 100)); pctEl.textContent = p + '%'; bar.style.width = p + '%'; status(L.isConnected ? '' : 'Cargando sonido ' + e.name + '…'); };
+    return Promise.all(first.map(e => sf.load(e.bank, e.program))).catch(err => { throw err; });
+  }).then(() => {
+    sf.onprogress = (e, g, size) => status(g >= size ? '' : `Cargando ${e.name} ${Math.round(g / size * 100)}%`);
+    try { buildRack(); buildPads(); syncTransport(); syncVoz(); renderTracks(); raf(); }
+    catch (e) { return fail(e); }
+    L.style.opacity = 0; setTimeout(() => L.remove(), 400);
+    if (!localStorage.getItem('tour2')) setTimeout(openCoach, 300);
+  }).catch(fail);
+  function fail(e) { msg.textContent = 'No se pudieron cargar los sonidos: ' + ((e && e.message) || e) + '. Revisa tu conexión.'; $('#ldRetry').hidden = false; bar.classList.add('err'); }
+}
+$('#ldRetry').onclick = boot;
+boot();

@@ -60,36 +60,72 @@
           });
         }
       }
-      this.presets.push({ name: p.name, bank: p.bank, program: p.preset, regions });
+      this.presets.push({ name: p.name, bank: p.bank, program: p.preset, regions, smpl: this.smpl, shdr: this.shdr });
     }
+  }
+
+  SF2.prototype.get = function (bank, prog) { return this.presets.find(p => p.bank === bank && p.program === prog) || this.presets.find(p => p.bank === bank) || this.presets[0]; };
+  SF2.prototype.load = function () { return Promise.resolve(); };
+  // Banco por fragmentos (un archivo por preset), cargado bajo demanda
+  function ChunkBank(base) { this.base = base; this.index = []; this.loaded = {}; this.pending = {}; this.onprogress = null; }
+  ChunkBank.prototype.entry = function (bank, prog) { return this.index.find(e => e.bank === bank && e.program === prog) || this.index.find(e => e.bank === bank) || this.index[0]; };
+  ChunkBank.prototype.get = function (bank, prog) { const e = this.entry(bank, prog); return e ? this.loaded[e.file] || null : null; };
+  ChunkBank.prototype.isLoaded = function (bank, prog) { return !!this.get(bank, prog); };
+  ChunkBank.prototype.load = function (bank, prog) {
+    const e = this.entry(bank, prog); if (!e) return Promise.reject(new Error('Sin índice de sonidos'));
+    if (this.loaded[e.file]) return Promise.resolve(this.loaded[e.file]);
+    if (this.pending[e.file]) return this.pending[e.file];
+    const self = this;
+    const pr = fetchBin(this.base + e.file, (got) => self.onprogress && self.onprogress(e, got, e.size)).then(ab => {
+      const dv = new DataView(ab), n = dv.getUint32(0, true);
+      const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(ab, 4, n)));
+      const p = { name: e.name, bank: e.bank, program: e.program, regions: meta.regions, shdr: meta.shdr, smpl: new Int16Array(ab, 4 + n, (ab.byteLength - 4 - n) >> 1) };
+      self.loaded[e.file] = p; delete self.pending[e.file]; return p;
+    }, err => { delete self.pending[e.file]; throw err; });
+    return (this.pending[e.file] = pr);
+  };
+  function fetchBin(url, onp, timeoutMs) {
+    timeoutMs = timeoutMs || 45000;
+    let ctrl = null; try { ctrl = new AbortController(); } catch (e) {}
+    let timer;
+    const to = new Promise((_, rej) => { timer = setTimeout(() => { try { ctrl && ctrl.abort(); } catch (e) {} rej(new Error('Tiempo de espera agotado al descargar ' + url.split('/').pop())); }, timeoutMs); });
+    const go = fetch(url, ctrl ? { signal: ctrl.signal } : {}).then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' en ' + url.split('/').pop());
+      if (!r.body || !r.body.getReader) return r.arrayBuffer();
+      const rd = r.body.getReader(), chunks = []; let got = 0;
+      const pump = () => rd.read().then(({ done, value }) => {
+        if (done) { const out = new Uint8Array(got); let o = 0; for (const c of chunks) { out.set(c, o); o += c.length; } return out.buffer; }
+        chunks.push(value); got += value.length; onp && onp(got); return pump();
+      });
+      return pump();
+    });
+    return Promise.race([go, to]).then(v => { clearTimeout(timer); return v; }, e => { clearTimeout(timer); throw e; });
   }
 
   function Synth(ctx, sf, out) {
     this.ctx = ctx; this.sf = sf; this.out = out; this.cache = {}; this.voices = {};
   }
-  Synth.prototype.find = function (bank, prog) {
-    return this.sf.presets.find(p => p.bank === bank && p.program === prog) || this.sf.presets.find(p => p.bank === bank) || this.sf.presets[0];
-  };
-  Synth.prototype.buffer = function (r) {
-    const key = r.sample + ':' + r.so + ':' + r.eo;
+  Synth.prototype.buffer = function (r, p) {
+    const key = p.bank + '_' + p.program + ':' + r.sample + ':' + r.so + ':' + r.eo;
     if (this.cache[key]) return this.cache[key];
-    const s = this.sf.shdr[r.sample];
+    const s = p.shdr[r.sample];
     const a = s.start + r.so, b = s.end + r.eo;
     const n = Math.max(1, b - a), buf = this.ctx.createBuffer(1, n, Math.max(8000, Math.min(96000, s.rate)));
-    const d = buf.getChannelData(0), src = this.sf.smpl;
+    const d = buf.getChannelData(0), src = p.smpl;
     for (let i = 0; i < n; i++) d[i] = src[a + i] / 32768;
     return (this.cache[key] = buf);
   };
   // noteOn: devuelve un id de voz; dest opcional
   Synth.prototype.noteOn = function (bank, prog, midi, vel, when, dest) {
     const ctx = this.ctx, t = when || ctx.currentTime;
-    const p = this.find(bank, prog);
+    const p = this.sf.get(bank, prog);
+    if (!p) { this.sf.load(bank, prog).catch(() => {}); return []; }
     const regs = p.regions.filter(r => midi >= r.lo && midi <= r.hi && vel >= r.vlo && vel <= r.vhi);
     const nodes = [];
     for (const r of regs) {
-      const s = this.sf.shdr[r.sample];
+      const s = p.shdr[r.sample];
       const src = ctx.createBufferSource();
-      src.buffer = this.buffer(r);
+      src.buffer = this.buffer(r, p);
       const root = r.root >= 0 ? r.root : s.key;
       const cents = (midi - root) * r.scale + r.tune - s.corr;
       src.playbackRate.value = Math.pow(2, cents / 1200);
@@ -122,6 +158,6 @@
       } catch (e) {}
     }
   };
-  const api = { SF2, Synth };
+  const api = { SF2, Synth, ChunkBank, fetchBin };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else Object.assign(root, api);
 })(this);

@@ -40,7 +40,7 @@
 <header id="top">
   <svg class="logo"><use href="#i-logo"/></svg>
   <div class="ttl"><b>Beatasy</b><span id="projName">Mi canción</span></div>
-  <button id="helpBtn" class="ib" aria-label="Ayuda"><svg><use href="#i-help"/></svg></button>
+  <span id="netStatus" hidden></span><button id="helpBtn" class="ib" aria-label="Ayuda"><svg><use href="#i-help"/></svg></button>
 </header>
 
 <div id="transport">
@@ -115,6 +115,12 @@
 <div id="sheet" class="sheet"><div class="grab"></div><div id="sheetBody"></div></div>
 <div id="coach" hidden><div id="spot"></div><div id="tip"><div class="tip-step" id="tipStep"></div><h3 id="tipT"></h3><p id="tipP"></p><div class="tip-b"><button id="tipSkip" class="link">Saltar</button><div><button id="tipPrev" class="ib sm"><svg><use href="#i-chevl"/></svg></button><button id="tipNext" class="grad sm">Siguiente</button></div></div></div></div>
 <div id="toast"></div>
-<div id="loading"><svg class="logo big"><use href="#i-logo"/></svg><div class="bar"><i></i></div><span>Cargando 128 instrumentos…</span></div>
+<div id="loading"><svg class="logo big"><use href="#i-logo"/></svg><div class="bar"><i></i></div><b id="ldPct">0%</b><span id="ldMsg">Cargando…</span><button id="ldRetry" class="grad sm" hidden>Reintentar</button></div>
+<script>
+/* Red de seguridad: muestra cualquier error de arranque en pantalla */
+window.__bootErr = function (m) { var s = document.getElementById('ldMsg'), r = document.getElementById('ldRetry'); if (s && document.getElementById('loading')) { s.textContent = 'Error: ' + m; r.hidden = false; r.onclick = r.onclick || function () { location.reload(); }; } };
+window.onerror = function (m, src, line) { window.__bootErr(m + (line ? ' (línea ' + line + ')' : '')); };
+setTimeout(function () { if (document.getElementById('loading')) { var r = document.getElementById('ldRetry'); if (r.hidden) { r.hidden = false; if (!r.onclick) r.onclick = function () { location.reload(); }; document.getElementById('ldMsg').textContent += ' — La carga está tardando. Puedes reintentar.'; } } }, 25000);
+</script>
 <script src="pitch.js"></script><script src="sf2.js"></script><script src="app.js"></script>
 </body></html>
